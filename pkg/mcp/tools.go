@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -58,12 +60,13 @@ type GetRelevantMemoryOutput struct {
 }
 
 type ResolveMemoryInput struct {
-	MemoryID      string  `json:"memory_id" jsonschema:"description=Synthetic UUID of the memory record,required"`
-	Action        string  `json:"action" jsonschema:"description=Action to perform: confirm | reject | edit,required"`
-	EditedContent string  `json:"edited_content,omitempty" jsonschema:"description=Required only when action is edit; replaces decision before confirming"`
-	ResolvedBy    string  `json:"resolved_by" jsonschema:"description=GitHub username or agent-session identity,required"`
-	PRMerged      bool    `json:"pr_merged,omitempty" jsonschema:"description=Explicit boolean flag indicating whether the originating PR is merged to the default branch"`
-	SourceContext *string `json:"source_context,omitempty" jsonschema:"description=Optional context e.g. PR #601 comment or agent session prompt"`
+	MemoryID         string   `json:"memory_id" jsonschema:"description=Synthetic UUID of the memory record,required"`
+	Action           string   `json:"action" jsonschema:"description=Action to perform: confirm | reject | edit,required"`
+	EditedContent    string   `json:"edited_content,omitempty" jsonschema:"description=Required only when action is edit; replaces decision before confirming"`
+	ResolvedBy       string   `json:"resolved_by" jsonschema:"description=GitHub username or agent-session identity,required"`
+	PRMerged         bool     `json:"pr_merged,omitempty" jsonschema:"description=Explicit boolean flag indicating whether the originating PR is merged to the default branch"`
+	AppliesToRepoIDs []string `json:"applies_to_repo_ids,omitempty" jsonschema:"description=Optional array of additional repo UUIDs this decision also explicitly applies to per §9.6"`
+	SourceContext    *string  `json:"source_context,omitempty" jsonschema:"description=Optional context e.g. PR #601 comment or agent session prompt"`
 }
 
 type ResolveMemoryOutput struct {
@@ -72,6 +75,62 @@ type ResolveMemoryOutput struct {
 	NewStatus      string `json:"new_status"`
 	NewTier        string `json:"new_tier"`
 	ResolvedAt     string `json:"resolved_at"`
+}
+
+func (s *MemoryService) resolveRepoScope(ctx context.Context, filesInScope []string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT repo_id, local_path FROM repo;")
+	if err != nil {
+		return nil, fmt.Errorf("failed to query repos for scope resolution: %w", err)
+	}
+	defer rows.Close()
+
+	type repoInfo struct {
+		id   string
+		path string
+	}
+	var allRepos []repoInfo
+	for rows.Next() {
+		var r repoInfo
+		if err := rows.Scan(&r.id, &r.path); err != nil {
+			return nil, fmt.Errorf("failed scanning repo info: %w", err)
+		}
+		allRepos = append(allRepos, r)
+	}
+
+	if len(allRepos) == 0 {
+		return nil, nil
+	}
+
+	implicatedMap := make(map[string]bool)
+
+	if len(filesInScope) > 0 {
+		for _, file := range filesInScope {
+			normFile := filepath.ToSlash(filepath.Clean(file))
+			for _, r := range allRepos {
+				if r.path == "" {
+					continue
+				}
+				normRepoPath := filepath.ToSlash(filepath.Clean(r.path))
+				if strings.HasPrefix(normFile, normRepoPath) || strings.HasPrefix(normRepoPath, normFile) || strings.Contains(normFile, normRepoPath) {
+					implicatedMap[r.id] = true
+				}
+			}
+		}
+	}
+
+	// If no specific repo matched or files_in_scope is empty, default to all registered repos (§9.6 / requirement 5)
+	if len(implicatedMap) == 0 {
+		for _, r := range allRepos {
+			implicatedMap[r.id] = true
+		}
+	}
+
+	implicatedIDs := make([]string, 0, len(implicatedMap))
+	for id := range implicatedMap {
+		implicatedIDs = append(implicatedIDs, id)
+	}
+
+	return implicatedIDs, nil
 }
 
 func (s *MemoryService) HandleGetRelevantMemory(ctx context.Context, req *mcpsdk.CallToolRequest, input GetRelevantMemoryInput) (*mcpsdk.CallToolResult, GetRelevantMemoryOutput, error) {
@@ -90,12 +149,21 @@ func (s *MemoryService) HandleGetRelevantMemory(ctx context.Context, req *mcpsdk
 		VALUES (NULL, 'retrieved', 'agent_session', $1);
 	`, auditCtx)
 
+	// Resolve implicated repositories per §9.6
+	implicatedRepoIDs, err := s.resolveRepoScope(ctx, input.FilesInScope)
+	if err != nil {
+		return nil, GetRelevantMemoryOutput{}, err
+	}
+	if len(implicatedRepoIDs) == 0 {
+		return nil, GetRelevantMemoryOutput{QueryTokensUsed: 0, Memories: []MemoryItem{}}, nil
+	}
+
 	// Stage 1 candidate retrieval: semantic similarity via pgvector plus memory_touches_file structural join
+	// Constrained to originating repo or memory_applies_to_repo per section 9.6
 	hasVectorExt := false
 	_ = s.db.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector');").Scan(&hasVectorExt)
 
 	var rows *sql.Rows
-	var err error
 
 	// Rejected records are excluded at retrieval query time per section 9.3 so they never occupy candidate slots
 	if hasVectorExt {
@@ -109,14 +177,21 @@ func (s *MemoryService) HandleGetRelevantMemory(ctx context.Context, req *mcpsdk
 			LEFT JOIN memory_touches_file f ON m.memory_id = f.memory_id
 			WHERE m.status != 'rejected'
 			  AND (
-				(cardinality($2::text[]) > 0 AND f.file_path = ANY($2::text[]))
+				m.repo_id::text = ANY($2)
+				OR EXISTS (
+					SELECT 1 FROM memory_applies_to_repo mar
+					WHERE mar.memory_id = m.memory_id AND mar.repo_id::text = ANY($2)
+				)
+			  )
+			  AND (
+				(cardinality($3::text[]) > 0 AND f.file_path = ANY($3::text[]))
 				OR m.content_embedding IS NOT NULL
-				OR m.decision ILIKE '%' || $3 || '%'
+				OR m.decision ILIKE '%' || $4 || '%'
 			  )
 			LIMIT 100;
 		`
 		dummyVec := pgvector.NewVector(make([]float32, 1536))
-		rows, err = s.db.QueryContext(ctx, query, dummyVec, pq.Array(input.FilesInScope), input.PromptText)
+		rows, err = s.db.QueryContext(ctx, query, dummyVec, pq.Array(implicatedRepoIDs), pq.Array(input.FilesInScope), input.PromptText)
 	} else {
 		query := `
 			SELECT DISTINCT
@@ -128,13 +203,20 @@ func (s *MemoryService) HandleGetRelevantMemory(ctx context.Context, req *mcpsdk
 			LEFT JOIN memory_touches_file f ON m.memory_id = f.memory_id
 			WHERE m.status != 'rejected'
 			  AND (
-				(cardinality($1::text[]) > 0 AND f.file_path = ANY($1::text[]))
+				m.repo_id::text = ANY($1)
+				OR EXISTS (
+					SELECT 1 FROM memory_applies_to_repo mar
+					WHERE mar.memory_id = m.memory_id AND mar.repo_id::text = ANY($1)
+				)
+			  )
+			  AND (
+				(cardinality($2::text[]) > 0 AND f.file_path = ANY($2::text[]))
 				OR m.content_embedding IS NOT NULL
-				OR m.decision ILIKE '%' || $2 || '%'
+				OR m.decision ILIKE '%' || $3 || '%'
 			  )
 			LIMIT 100;
 		`
-		rows, err = s.db.QueryContext(ctx, query, pq.Array(input.FilesInScope), input.PromptText)
+		rows, err = s.db.QueryContext(ctx, query, pq.Array(implicatedRepoIDs), pq.Array(input.FilesInScope), input.PromptText)
 	}
 
 	if err != nil {
@@ -329,7 +411,13 @@ func (s *MemoryService) HandleResolveMemory(ctx context.Context, req *mcpsdk.Cal
 		newStatus = "rejected"
 	}
 
-	_, err = s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, ResolveMemoryOutput{}, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
 		UPDATE memory_record
 		SET status = $1,
 			tier = $2,
@@ -342,6 +430,20 @@ func (s *MemoryService) HandleResolveMemory(ctx context.Context, req *mcpsdk.Cal
 
 	if err != nil {
 		return nil, ResolveMemoryOutput{}, fmt.Errorf("failed to update memory record: %w", err)
+	}
+
+	// Write cross-repo applicability entries (§9.6)
+	if input.Action == "confirm" && len(input.AppliesToRepoIDs) > 0 {
+		for _, appRepoID := range input.AppliesToRepoIDs {
+			_, err = tx.ExecContext(ctx, `
+				INSERT INTO memory_applies_to_repo (memory_id, repo_id)
+				VALUES ($1, $2)
+				ON CONFLICT (memory_id, repo_id) DO NOTHING;
+			`, input.MemoryID, appRepoID)
+			if err != nil {
+				return nil, ResolveMemoryOutput{}, fmt.Errorf("failed to insert applicability row: %w", err)
+			}
+		}
 	}
 
 	// Audit log entry (§14)
@@ -361,10 +463,17 @@ func (s *MemoryService) HandleResolveMemory(ctx context.Context, req *mcpsdk.Cal
 		eventType = "edited"
 	}
 
-	_, _ = s.db.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO audit_log (memory_id, event_type, actor, context, occurred_at)
 		VALUES ($1, $2, $3, $4, $5);
 	`, input.MemoryID, eventType, input.ResolvedBy, auditCtx, now)
+	if err != nil {
+		return nil, ResolveMemoryOutput{}, fmt.Errorf("failed to insert audit log: %w", err)
+	}
+
+	if err = tx.Commit(); err != nil {
+		return nil, ResolveMemoryOutput{}, fmt.Errorf("failed to commit transaction: %w", err)
+	}
 
 	return nil, ResolveMemoryOutput{
 		MemoryID:       input.MemoryID,

@@ -162,4 +162,207 @@ func TestMCPToolsEndToEnd(t *testing.T) {
 			t.Fatalf("Expected audit_log entry for 'edited' event, found count=%d, err=%v", auditCount, err)
 		}
 	})
+
+	t.Run("stage 2 multi-repo scope resolution and cross-repo retrieval (§9.6)", func(t *testing.T) {
+		// Seed Repo 1 and Repo 2 with local_path
+		var repo1ID, repo2ID string
+		err = sqlDB.QueryRow(`
+			INSERT INTO repo (github_installation_id, github_repo_full_name, local_path)
+			VALUES (111, 'org/backend-service', '/workspace/backend')
+			RETURNING repo_id;
+		`).Scan(&repo1ID)
+		if err != nil {
+			t.Fatalf("Failed seeding repo1: %v", err)
+		}
+
+		err = sqlDB.QueryRow(`
+			INSERT INTO repo (github_installation_id, github_repo_full_name, local_path)
+			VALUES (222, 'org/frontend-app', '/workspace/frontend')
+			RETURNING repo_id;
+		`).Scan(&repo2ID)
+		if err != nil {
+			t.Fatalf("Failed seeding repo2: %v", err)
+		}
+
+		// Seed memory record for backend repo
+		var memBackendID string
+		err = sqlDB.QueryRow(`
+			INSERT INTO memory_record (repo_id, tier, status, decision, reasoning, originating_commit, created_by)
+			VALUES ($1, 'canonical', 'confirmed', 'gRPC API contract v2 for auth', 'High throughput binary protocol', 'c1', 'alice')
+			RETURNING memory_id;
+		`, repo1ID).Scan(&memBackendID)
+		if err != nil {
+			t.Fatalf("Failed seeding backend memory: %v", err)
+		}
+
+		// Seed memory record for frontend repo (isolated)
+		var memFrontendID string
+		err = sqlDB.QueryRow(`
+			INSERT INTO memory_record (repo_id, tier, status, decision, reasoning, originating_commit, created_by)
+			VALUES ($1, 'canonical', 'confirmed', 'React Query state management', 'Caching client side state', 'c2', 'bob')
+			RETURNING memory_id;
+		`, repo2ID).Scan(&memFrontendID)
+		if err != nil {
+			t.Fatalf("Failed seeding frontend memory: %v", err)
+		}
+
+		// Seed cross-repo decision originating in backend repo, but applied to frontend repo via resolve_memory / memory_applies_to_repo
+		var memCrossID string
+		err = sqlDB.QueryRow(`
+			INSERT INTO memory_record (repo_id, tier, status, decision, reasoning, originating_commit, created_by)
+			VALUES ($1, 'probabilistic', 'proposed', 'Shared OAuth Token Schema', 'Common token format between frontend and backend', 'c3', 'charlie')
+			RETURNING memory_id;
+		`, repo1ID).Scan(&memCrossID)
+		if err != nil {
+			t.Fatalf("Failed seeding cross memory: %v", err)
+		}
+
+		// Confirm cross memory and mark as applying to frontend repo (repo2ID)
+		_, _, err = svc.HandleResolveMemory(ctx, nil, ResolveMemoryInput{
+			MemoryID:         memCrossID,
+			Action:           "confirm",
+			ResolvedBy:       "charlie",
+			PRMerged:         true,
+			AppliesToRepoIDs: []string{repo2ID},
+		})
+		if err != nil {
+			t.Fatalf("Failed resolving cross-repo memory: %v", err)
+		}
+
+		// Add memory_touches_file entries for test records
+		_, err = sqlDB.Exec(`
+			INSERT INTO memory_touches_file (memory_id, file_path)
+			VALUES ($1, '/workspace/backend/src/main.go'), ($2, '/workspace/frontend/src/App.tsx'), ($3, '/workspace/frontend/src/App.tsx');
+		`, memBackendID, memFrontendID, memCrossID)
+		if err != nil {
+			t.Fatalf("Failed seeding memory_touches_file for multi-repo test: %v", err)
+		}
+
+		// 1. Query with files_in_scope targeting frontend (/workspace/frontend/src/App.tsx)
+		_, outputFrontend, err := svc.HandleGetRelevantMemory(ctx, nil, GetRelevantMemoryInput{
+			PromptText:   "OAuth state management",
+			FilesInScope: []string{"/workspace/frontend/src/App.tsx"},
+			TokenBudget:  4000,
+		})
+		if err != nil {
+			t.Fatalf("Querying frontend scope failed: %v", err)
+		}
+
+		// Should include memFrontendID and memCrossID (applies to frontend), but NOT memBackendID
+		foundFrontend := false
+		foundCross := false
+		foundBackend := false
+
+		for _, m := range outputFrontend.Memories {
+			if m.MemoryID == memFrontendID {
+				foundFrontend = true
+			}
+			if m.MemoryID == memCrossID {
+				foundCross = true
+			}
+			if m.MemoryID == memBackendID {
+				foundBackend = true
+			}
+		}
+
+		if !foundFrontend || !foundCross {
+			t.Fatalf("Expected frontend and cross-repo memories returned for frontend scope query. Got memories: %+v", outputFrontend.Memories)
+		}
+		if foundBackend {
+			t.Fatalf("Backend-only memory improperly returned for frontend scope query!")
+		}
+
+		// 2. Query with empty files_in_scope (requirement 5 fallback to all registered repos)
+		_, outputAll, err := svc.HandleGetRelevantMemory(ctx, nil, GetRelevantMemoryInput{
+			PromptText:   "contract",
+			FilesInScope: []string{},
+			TokenBudget:  4000,
+		})
+		if err != nil {
+			t.Fatalf("Querying with unsupplied files_in_scope failed: %v", err)
+		}
+
+		if len(outputAll.Memories) == 0 {
+			t.Fatalf("Expected memories returned when files_in_scope is empty, got 0")
+		}
+	})
+
+	t.Run("resolve_memory transaction rollback on failure", func(t *testing.T) {
+		// We'll reuse repoID from earlier in the test for seeding
+		var txMemID string
+		err = sqlDB.QueryRow(`
+			INSERT INTO memory_record (repo_id, tier, status, decision, reasoning, originating_commit, created_by)
+			VALUES ($1, 'probabilistic', 'proposed', 'Test rollback', 'Reasoning', 'comm00112233', 'alice')
+			RETURNING memory_id;
+		`, repoID).Scan(&txMemID)
+		if err != nil {
+			t.Fatalf("Failed seeding tx memory: %v", err)
+		}
+
+		// Try to resolve with an invalid repo ID in AppliesToRepoIDs to trigger a database constraint/type error
+		_, _, err = svc.HandleResolveMemory(ctx, nil, ResolveMemoryInput{
+			MemoryID:         txMemID,
+			Action:           "confirm",
+			ResolvedBy:       "alice",
+			PRMerged:         true,
+			AppliesToRepoIDs: []string{"invalid-uuid"},
+		})
+		
+		if err == nil {
+			t.Fatalf("Expected error when providing invalid repo ID, got nil")
+		}
+
+		// Verify that memory_record is NOT updated (status should still be 'proposed')
+		var currentStatus string
+		err = sqlDB.QueryRow("SELECT status FROM memory_record WHERE memory_id = $1;", txMemID).Scan(&currentStatus)
+		if err != nil {
+			t.Fatalf("Failed to query status: %v", err)
+		}
+		if currentStatus != "proposed" {
+			t.Fatalf("Expected status to remain 'proposed', got '%s'", currentStatus)
+		}
+
+		// Verify no rows in memory_applies_to_repo for this memory
+		var count int
+		err = sqlDB.QueryRow("SELECT COUNT(*) FROM memory_applies_to_repo WHERE memory_id = $1;", txMemID).Scan(&count)
+		if err != nil {
+			t.Fatalf("Failed to query memory_applies_to_repo: %v", err)
+		}
+		if count > 0 {
+			t.Fatalf("Expected 0 rows in memory_applies_to_repo, got %d", count)
+		}
+	})
+
+	t.Run("resolve_memory reject does not insert applies_to_repo", func(t *testing.T) {
+		var rejectMemID string
+		err = sqlDB.QueryRow(`
+			INSERT INTO memory_record (repo_id, tier, status, decision, reasoning, originating_commit, created_by)
+			VALUES ($1, 'probabilistic', 'proposed', 'Test reject', 'Reasoning', 'comm00112233', 'alice')
+			RETURNING memory_id;
+		`, repoID).Scan(&rejectMemID)
+		if err != nil {
+			t.Fatalf("Failed seeding reject memory: %v", err)
+		}
+
+		_, _, err = svc.HandleResolveMemory(ctx, nil, ResolveMemoryInput{
+			MemoryID:         rejectMemID,
+			Action:           "reject",
+			ResolvedBy:       "alice",
+			PRMerged:         false,
+			AppliesToRepoIDs: []string{repoID}, // Even with a valid ID, reject shouldn't insert
+		})
+		if err != nil {
+			t.Fatalf("Expected success for reject, got error: %v", err)
+		}
+
+		// Verify no rows in memory_applies_to_repo for this memory
+		var count int
+		err = sqlDB.QueryRow("SELECT COUNT(*) FROM memory_applies_to_repo WHERE memory_id = $1;", rejectMemID).Scan(&count)
+		if err != nil {
+			t.Fatalf("Failed to query memory_applies_to_repo: %v", err)
+		}
+		if count > 0 {
+			t.Fatalf("Expected 0 rows in memory_applies_to_repo for rejected memory, got %d", count)
+		}
+	})
 }
