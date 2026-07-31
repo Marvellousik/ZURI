@@ -14,6 +14,7 @@ import (
 	"zuri-daemon/pkg/db"
 	"zuri-daemon/pkg/mcp"
 	"zuri-daemon/pkg/server"
+	"zuri-daemon/pkg/webhooks"
 )
 
 func main() {
@@ -92,7 +93,10 @@ func main() {
 		})
 	}
 
-	mux.HandleFunc("/webhooks/", unimplementedHandler)
+	githubWebhookSecret := os.Getenv("GITHUB_WEBHOOK_SECRET")
+	webhookHandler := webhooks.NewGitHubWebhookHandler(githubWebhookSecret)
+	mux.Handle("/webhooks/github", webhookHandler)
+
 	mux.HandleFunc("/events/", unimplementedHandler)
 
 	addr := fmt.Sprintf("%s:%s", host, port)

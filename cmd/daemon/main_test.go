@@ -33,7 +33,7 @@ func TestEndToEndMCPRouting(t *testing.T) {
 		"ZURI_PORT=7345",
 		"ZURI_HOST=127.0.0.1",
 		"ZURI_DB_PATH="+tmpDir,
-		"ZURI_SKIP_VECTOR_CHECK=1",
+		"ZURI_DISABLE_PGVECTOR_VALIDATION_FOR_TESTS=1",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

@@ -122,7 +122,7 @@ func RunMigrations(db *sql.DB) (int, error) {
 }
 
 func ValidateVectorExtension(db *sql.DB) error {
-	if os.Getenv("ZURI_SKIP_VECTOR_CHECK") == "1" {
+	if os.Getenv("ZURI_DISABLE_PGVECTOR_VALIDATION_FOR_TESTS") == "1" {
 		return nil
 	}
 	var exists bool
