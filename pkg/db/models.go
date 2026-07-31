@@ -73,7 +73,7 @@ type MemoryRecord struct {
 	Decision            string           `json:"decision"`
 	Reasoning           string           `json:"reasoning"`
 	ContentEmbedding    []float32        `json:"content_embedding,omitempty"`
-	OriginatingCommit   string           `json:"originating_commit"`
+	OriginatingCommit   *string          `json:"originating_commit,omitempty"`
 	OriginatingPRNumber *int             `json:"originating_pr_number,omitempty"`
 	CreatedBy           string           `json:"created_by"`
 	ResolvedBy          *string          `json:"resolved_by,omitempty"`
