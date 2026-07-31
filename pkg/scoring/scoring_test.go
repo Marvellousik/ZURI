@@ -128,7 +128,7 @@ func TestRevivalFlagging(t *testing.T) {
 }
 
 func TestRetrievalLatencyBenchmark5000Records(t *testing.T) {
-	os.Setenv("ZURI_DB_PORT", "5440")
+	os.Setenv("ZURI_DB_PORT", "5442")
 	tmpDir, err := os.MkdirTemp("", "zuri_bench_test_*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)

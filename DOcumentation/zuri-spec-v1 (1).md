@@ -61,13 +61,25 @@ The brain is not a chatbot you ask questions of. It's a standing local service t
 
 ## 4. Conflict Resolution & Write Gating
 
-**No direct writes to canonical memory — ever. No raw INSERT/UPDATE path exists in the codebase for canonical records.** Memory review is gated by code review, exactly like code:
+**No direct writes to canonical memory — ever. No raw INSERT/UPDATE path exists in the codebase for canonical records.** Memory review is gated by code review or explicit founder confirmation, exactly like code:
 
 - On-site developers can't merge to main directly → they also can't write to canonical memory directly.
 - A PR that changes canonical memory carries the proposed memory-write alongside it.
 - Same reviewers, same approval flow, same moment of landing. Memory is never approved faster or slower than the code describing it.
 - No parallel path where memory could bypass the gate that code has to go through.
-- **Mechanical enforcement**: the only two write paths into `memory_record` are (a) the ingestion pipeline (§10, triggered exclusively by GitHub webhooks) and (b) the `resolve_memory` MCP tool (§13.2), which itself only transitions existing `proposed` records — it cannot create a `confirmed` canonical record from nothing. There is no admin panel, no direct DB write endpoint, no CLI command that bypasses this. This is an implementation requirement, not a policy statement — the agent building this must not add a "manual override" write path under any circumstance, including for testing/seeding (use fixtures/migrations for that instead).
+- **Mechanical enforcement**: the only write paths into `memory_record` are:
+  (a) the GitHub ingestion pipeline (§10), for PR-derived memory;
+  (b) the onboarding ingestion flow (§10.5), which may create canonical records only after explicit founder confirmation during Create Brain; and
+  (c) the `resolve_memory` MCP tool (§13.3), which only transitions existing `proposed` records and cannot create a new canonical record.
+
+  There is no admin panel, direct database endpoint, or CLI command that bypasses one of these review-gated flows. Use fixtures/migrations for testing and seeding.
+
+  This preserves the architectural principle:
+  - **PR-derived truth** → gated by code review.
+  - **Greenfield truth** → gated by founder confirmation.
+  - **Runtime confirmation** → only via state transition, never direct insertion.
+
+  So the invariant becomes **"every canonical record must pass through an explicit review gate,"** rather than "every canonical record originates from a GitHub webhook."
 
 ---
 
@@ -388,6 +400,8 @@ MCP defines two official transports — stdio (host process spawns the server di
 
 **Decision: a separate SSE endpoint, not on the MCP tool-call path, purely for the GUI's live activity feed** (§12). This is a legitimate server-push use case — pushing "agent X just queried Y" events to the Electron UI in real time — distinct from and not to be confused with the MCP tool-call request/response, which is single-shot: the retrieval computation (Stage 1 + Stage 2, §9) completes server-side before a response is returned, so there is no meaningful partial result to stream mid-computation on that path.
 
+**Testing Requirement**: An explicit end-to-end test requirement MUST exercise the actual Streamable HTTP server by POSTing/requesting through the registered `http.ServeMux` rather than invoking handlers directly. This prevents HTTP routing regressions (such as route handler shadowing/overrides) that unit tests against handler functions alone would miss, complementing the transport requirements without altering the underlying architecture.
+
 ### 13.2 Tool: `get_relevant_memory`
 
 **Input schema:**
@@ -498,7 +512,7 @@ This is a suggested sequence for a coding agent to follow, front-loading the pie
 
 1. **Postgres schema** (§7.2) — all tables, indexes, the `memory_citation`-driven trigger for `citation_count`/`last_cited_at`.
 2. **Go daemon skeleton** — process that boots, manages embedded Postgres, exposes health check.
-3. **MCP server, Streamable HTTP transport** (§13.1) — wire up `get_relevant_memory` and `resolve_memory` (§13.2/13.3) against the schema, even with stubbed/naive scoring initially.
+3. **MCP server, Streamable HTTP transport** (§13.1) — wire up `get_relevant_memory` and `resolve_memory` (§13.2/13.3) against the schema, even with stubbed/naive scoring initially. Must include end-to-end HTTP integration tests that request through the registered `http.ServeMux` (rather than isolated handler function calls) to ensure routing correctness and prevent route handler shadowing.
 4. **Scoring model** (§9.3) — replace naive scoring with the real formula once retrieval plumbing works end-to-end.
 5. **GitHub App registration + webhook receiver** (§10.3) — manifest, signature verification, event routing.
 6. **Extraction pipeline** (§10.2) — LLM inference call + bot comment posting.
