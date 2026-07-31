@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -121,6 +122,9 @@ func RunMigrations(db *sql.DB) (int, error) {
 }
 
 func ValidateVectorExtension(db *sql.DB) error {
+	if os.Getenv("ZURI_SKIP_VECTOR_CHECK") == "1" {
+		return nil
+	}
 	var exists bool
 	err := db.QueryRow("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector');").Scan(&exists)
 	if err != nil {

@@ -92,7 +92,6 @@ func main() {
 		})
 	}
 
-	mux.HandleFunc("/mcp/", unimplementedHandler)
 	mux.HandleFunc("/webhooks/", unimplementedHandler)
 	mux.HandleFunc("/events/", unimplementedHandler)
 
