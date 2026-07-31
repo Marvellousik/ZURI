@@ -84,6 +84,7 @@ type MemoryRecord struct {
 	ExpiresAt           *time.Time       `json:"expires_at,omitempty"`
 	CitationCount       int              `json:"citation_count"`
 	LastCitedAt         *time.Time       `json:"last_cited_at,omitempty"`
+	LastRemindedAt      *time.Time       `json:"last_reminded_at,omitempty"`
 }
 
 // MemoryTouchesFile maps to the `memory_touches_file` join table
