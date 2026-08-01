@@ -192,4 +192,4 @@ docs/build/
 
 *.swp
 *.swo
-*~
+*~node_modules/
