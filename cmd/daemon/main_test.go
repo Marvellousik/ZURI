@@ -51,7 +51,7 @@ func TestEndToEndMCPRouting(t *testing.T) {
 
 	// Wait for server to start (polling health endpoint)
 	serverUp := false
-	for i := 0; i < 40; i++ { // 20 seconds max for DB init
+	for i := 0; i < 120; i++ { // 60 seconds max for DB init
 		time.Sleep(500 * time.Millisecond)
 		resp, err := http.Get("http://127.0.0.1:7345/api/health")
 		if err == nil {

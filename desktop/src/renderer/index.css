@@ -1,0 +1,148 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap');
+
+:root {
+  /* Core Palette (Light Mode - Locked) */
+  --color-primary: #0E5C56;
+  --color-primary-hover: #0A4A45;
+  --color-primary-tint: #E3EDEB;
+  --color-text-primary: #161A19;
+  --color-text-secondary: #4B5350;
+  --color-background: #FAF7F1;
+  --color-surface: #FFFFFF;
+  --color-surface-raised: #FFFFFF;
+  --color-muted: #8C978F;
+  --color-border: #DDD7C9;
+  --color-border-strong: #C5BEAC;
+
+  /* Functional Colors (Light Mode) */
+  --color-success: #3F6E52;
+  --color-warning: #93672B;
+  --color-danger: #8C3B33;
+  --color-info: #2F6E74;
+  --color-on-primary: #FFFFFF;
+
+  /* Elevation & Shadows (Light Mode) */
+  --shadow-level-0: none;
+  --shadow-level-1: 0 1px 2px rgba(22, 26, 25, 0.06), 0 1px 1px rgba(22, 26, 25, 0.04);
+  --shadow-modal: 0 4px 12px rgba(22, 26, 25, 0.12);
+
+  /* Typography */
+  --font-sans: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'IBM Plex Mono', monospace;
+
+  /* Spacing Scale (4, 8, 12, 16, 24, 32, 48 px) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+
+  /* Radii Scale (Consistent & Small) */
+  --radius-pill: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+
+  /* Motion Tokens */
+  --motion-fast: 100ms;
+  --motion-normal: 150ms;
+  --motion-slow: 250ms;
+  --easing-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  /* Iconography Tokens */
+  --icon-size-default: 18px;
+  --icon-stroke-default: 1.75px;
+}
+
+[data-theme='dark'] {
+  /* Core Palette (Dark Mode - Tuned for Dark Background) */
+  --color-primary: #3EA99C;
+  --color-primary-hover: #54BBAE;
+  --color-primary-tint: #1B2E2B;
+  --color-text-primary: #F1ECE1;
+  --color-text-secondary: #A69E90;
+  --color-background: #17191A;
+  --color-surface: #201F1D;
+  --color-surface-raised: #28221D;
+  --color-muted: #726B60;
+  --color-border: #39332B;
+  --color-border-strong: #4E463A;
+
+  /* Functional Colors (Dark Mode) */
+  --color-success: #5C9E76;
+  --color-warning: #C99245;
+  --color-danger: #C6685B;
+  --color-info: #4FA0A9;
+  --color-on-primary: #0E1413;
+
+  /* Elevation & Shadows (Dark Mode - Fill & Border Driven) */
+  --shadow-level-0: none;
+  --shadow-level-1: none;
+  --shadow-modal: 0 4px 16px rgba(0, 0, 0, 0.45);
+}
+
+/* Global Reset & Base Typography */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 400;
+  background-color: var(--color-background);
+  color: var(--color-text-primary);
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  height: 100vh;
+  width: 100vw;
+}
+
+/* Motion Animations */
+@keyframes activityFeedEnter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes panelFadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+/* Respect Reduced Motion Preferences */
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

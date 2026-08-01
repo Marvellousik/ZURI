@@ -14,6 +14,7 @@ import (
 	"zuri-daemon/pkg/db"
 	"zuri-daemon/pkg/mcp"
 	"zuri-daemon/pkg/server"
+	"zuri-daemon/pkg/sse"
 	"zuri-daemon/pkg/webhooks"
 )
 
@@ -56,6 +57,7 @@ func main() {
 
 	healthSvr := server.NewHealthServer(dbMgr.GetDB(), startTime)
 	mcpHandler := mcp.NewServerHandler(dbMgr.GetDB())
+	sseServer := sse.NewServer()
 
 	mux := http.NewServeMux()
 
@@ -63,6 +65,12 @@ func main() {
 	mux.HandleFunc("/api/health", healthSvr.HandleHealthCheck)
 	mux.Handle("/mcp/", mcpHandler)
 	mux.Handle("/mcp", mcpHandler)
+	mux.Handle("/events/", sseServer)
+	mux.Handle("/events", sseServer)
+
+	githubWebhookSecret := os.Getenv("GITHUB_WEBHOOK_SECRET")
+	webhookHandler := webhooks.NewGitHubWebhookHandler(githubWebhookSecret)
+	mux.Handle("/webhooks/github", webhookHandler)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -82,22 +90,6 @@ func main() {
 			"status":  "running",
 		})
 	})
-
-	// Placeholder route groups for future build phases
-	// MCP server, GitHub webhook receiver, and SSE activity stream attach here in later sessions.
-	unimplementedHandler := func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotImplemented)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error": "Endpoint not implemented in session S1",
-		})
-	}
-
-	githubWebhookSecret := os.Getenv("GITHUB_WEBHOOK_SECRET")
-	webhookHandler := webhooks.NewGitHubWebhookHandler(githubWebhookSecret)
-	mux.Handle("/webhooks/github", webhookHandler)
-
-	mux.HandleFunc("/events/", unimplementedHandler)
 
 	addr := fmt.Sprintf("%s:%s", host, port)
 	srv := &http.Server{
