@@ -1,0 +1,195 @@
+# ==========================================================
+# ZURI - Root .gitignore
+# ==========================================================
+
+############################
+# Dependencies
+############################
+
+node_modules/
+**/node_modules/
+.pnpm-store/
+.npm/
+.yarn/
+.yarn/cache/
+.yarn/unplugged/
+.yarn/build-state.yml
+.yarn/install-state.gz
+
+############################
+# Build outputs
+############################
+
+dist/
+build/
+out/
+release/
+coverage/
+.tmp/
+temp/
+.cache/
+.eslintcache
+.parcel-cache/
+.vite/
+
+############################
+# Electron
+############################
+
+desktop/dist/
+desktop/out/
+desktop/release/
+desktop/.vite/
+
+############################
+# Go
+############################
+
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+*.test
+*.out
+coverage.out
+coverage.html
+
+bin/
+vendor/
+
+############################
+# Rust (future)
+############################
+
+target/
+
+############################
+# Python (future)
+############################
+
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+.python-version
+
+.venv/
+venv/
+ENV/
+env/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+############################
+# Environment files
+############################
+
+.env
+.env.*
+!.env.example
+!.env.template
+
+############################
+# Secrets
+############################
+
+*.pem
+*.key
+*.p12
+*.pfx
+
+credentials.json
+service-account.json
+
+############################
+# Logs
+############################
+
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+############################
+# IDE
+############################
+
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+.idea/
+*.iml
+
+############################
+# OS
+############################
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+############################
+# Git
+############################
+
+*.orig
+*.rej
+
+############################
+# Archives
+############################
+
+*.zip
+*.tar
+*.gz
+*.rar
+*.7z
+
+############################
+# Terraform (future)
+############################
+
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+
+############################
+# Docker
+############################
+
+docker-data/
+docker-volumes/
+
+############################
+# AI / ML
+############################
+
+wandb/
+mlruns/
+checkpoints/
+models/
+weights/
+
+############################
+# Generated docs
+############################
+
+site/
+docs/build/
+
+############################
+# Misc
+############################
+
+*.swp
+*.swo
+*~
