@@ -1,0 +1,42 @@
+services:
+  # PostgreSQL with pre-compiled pgvector extension (§7.2, §12)
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: zuri-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: zuri_db
+      POSTGRES_USER: zuri
+      POSTGRES_PASSWORD: zuri_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      # Persistent volume ensures vector embeddings and memory records are never lost
+      - zuri_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zuri -d zuri_db"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+
+  # Zuri Go Daemon (HTTP/SSE + MCP Server + Dual-Subsystem Vector/Graph Engine)
+  zuri-daemon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: zuri-daemon
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "7331:7331"
+    environment:
+      - ZURI_PORT=7331
+      - ZURI_HOST=0.0.0.0
+      - ZURI_DB_URL=postgres://zuri:zuri_pass@db:5432/zuri_db?sslmode=disable
+      - ZURI_STRICT_PGVECTOR=1
+
+volumes:
+  zuri_postgres_data:
+    driver: local

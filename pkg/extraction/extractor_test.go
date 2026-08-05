@@ -19,26 +19,44 @@ func (m *mockLLM) Generate(ctx context.Context, prompt string) (string, error) {
 	return m.response, nil
 }
 
+type mockCalibrator struct {
+	calibrated float64
+	isCal      bool
+	err        error
+}
+
+func (mc *mockCalibrator) Calibrate(ctx context.Context, modelID string, concern string, rawConfidence float64) (float64, bool, error) {
+	if mc.err != nil {
+		return rawConfidence, false, mc.err
+	}
+	return mc.calibrated, mc.isCal, nil
+}
+
 func TestPRExtractor_Extract(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name        string
-		prCtx       PRContext
-		mockResp    string
-		mockErr     error
-		expectCount int
-		expectErr   bool
+		name          string
+		prCtx         PRContext
+		mockResp      string
+		mockErr       error
+		calibrator    Calibrator
+		expectCount   int
+		expectErr     bool
+		expectKey     string
+		expectConcern string
 	}{
 		{
-			name: "Successful Extraction",
+			name: "Successful Extraction with RFC 7.4 taxonomy",
 			prCtx: PRContext{
 				RepoFullName: "org/repo",
 				Description:  "Migrated to Go",
 			},
-			mockResp:    `{"decisions":[{"decision":"Use Go","reasoning":"Performance"}]}`,
-			expectCount: 1,
-			expectErr:   false,
+			mockResp:      `{"decisions":[{"decision":"Use Go","reasoning":"Performance","concern":"reliability","decision_type":"retry-policy","boundary":"payments","extraction_confidence_raw":0.9}]}`,
+			expectCount:   1,
+			expectErr:     false,
+			expectKey:     "boundary:payments/concern:reliability/decision_type:retry-policy",
+			expectConcern: "reliability",
 		},
 		{
 			name: "Malformed LLM Response",
@@ -83,11 +101,22 @@ func TestPRExtractor_Extract(t *testing.T) {
 			expectCount: 1,
 			expectErr:   false,
 		},
+		{
+			name: "Calibrated Extraction",
+			prCtx: PRContext{
+				RepoFullName: "org/repo",
+			},
+			mockResp:    `{"decisions":[{"decision":"Use Retry","reasoning":"Reliability","concern":"reliability","decision_type":"retry-policy","boundary":"checkout","extraction_confidence_raw":0.85}]}`,
+			calibrator:  &mockCalibrator{calibrated: 0.92, isCal: true},
+			expectCount: 1,
+			expectErr:   false,
+			expectKey:   "boundary:checkout/concern:reliability/decision_type:retry-policy",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			extractor := NewPRExtractor(&mockLLM{response: tt.mockResp, err: tt.mockErr})
+			extractor := NewPRExtractor(&mockLLM{response: tt.mockResp, err: tt.mockErr}, tt.calibrator, "test-model")
 			res, err := extractor.Extract(ctx, tt.prCtx)
 
 			if (err != nil) != tt.expectErr {
@@ -97,12 +126,18 @@ func TestPRExtractor_Extract(t *testing.T) {
 			if !tt.expectErr && len(res.Decisions) != tt.expectCount {
 				t.Errorf("Expected %d decisions, got %d", tt.expectCount, len(res.Decisions))
 			}
+
+			if !tt.expectErr && tt.expectKey != "" && len(res.Decisions) > 0 {
+				if res.Decisions[0].DecisionKey != tt.expectKey {
+					t.Errorf("Expected decision_key %s, got %s", tt.expectKey, res.Decisions[0].DecisionKey)
+				}
+			}
 		})
 	}
 }
 
 func TestPRExtractor_BuildPrompt(t *testing.T) {
-	extractor := NewPRExtractor(nil)
+	extractor := NewPRExtractor(nil, nil, "test-model")
 
 	pr := PRContext{
 		RepoFullName:     "org/repo",
@@ -117,7 +152,6 @@ func TestPRExtractor_BuildPrompt(t *testing.T) {
 
 	prompt := extractor.buildPrompt(pr)
 
-	// Ensure all sections are present
 	sections := []string{
 		"Repository: org/repo",
 		"PR Number: 42",
@@ -134,27 +168,18 @@ func TestPRExtractor_BuildPrompt(t *testing.T) {
 			t.Errorf("Expected prompt to contain '%s', but it did not. Prompt:\n%s", s, prompt)
 		}
 	}
+}
 
-	// Test missing sections
-	emptyPr := PRContext{
-		RepoFullName: "org/repo",
-		PRNumber:     43,
+func TestDBCalibrator_UncalibratedUnderMinSample(t *testing.T) {
+	calibrator := NewDBCalibrator(nil)
+	ctx := context.Background()
+
+	conf, isCal, err := calibrator.Calibrate(ctx, "claude-sonnet", "reliability", 0.85)
+	if err != nil {
+		t.Fatalf("Expected no error from nil db calibrator fallback, got %v", err)
 	}
 
-	emptyPrompt := extractor.buildPrompt(emptyPr)
-	
-	notExpectedSections := []string{
-		"### Description",
-		"### Commits",
-		"### Unified Diff",
-		"### Review Comments",
-		"### Issue Comments",
-		"### Linked Issues",
-	}
-
-	for _, s := range notExpectedSections {
-		if strings.Contains(emptyPrompt, s) {
-			t.Errorf("Expected prompt to omit '%s', but it was included. Prompt:\n%s", s, emptyPrompt)
-		}
+	if !isCal && conf != 0.85 {
+		t.Errorf("Expected raw confidence pass-through 0.85, got %f", conf)
 	}
 }

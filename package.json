@@ -1,0 +1,13 @@
+{
+  "name": "zuri-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Zuri — Evidence-First Engineering Memory System",
+  "scripts": {
+    "daemon:build": "go build -o zuri-daemon.exe ./cmd/daemon",
+    "daemon:start": "go run ./cmd/daemon/main.go",
+    "cli:build": "go build -o zuri.exe ./cmd/zuri",
+    "docker:up": "docker compose up -d --build",
+    "docker:down": "docker compose down"
+  }
+}

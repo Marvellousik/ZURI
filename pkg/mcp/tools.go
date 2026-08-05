@@ -10,8 +10,10 @@ import (
 	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/pgvector/pgvector-go"
 	"github.com/lib/pq"
+	pgvector "github.com/pgvector/pgvector-go"
+
+	"zuri-daemon/pkg/graph"
 	"zuri-daemon/pkg/scoring"
 )
 
@@ -24,9 +26,9 @@ func NewMemoryService(db *sql.DB) *MemoryService {
 }
 
 type GetRelevantMemoryInput struct {
-	PromptText   string   `json:"prompt_text" jsonschema:"description=The developer's actual prompt,required"`
-	FilesInScope []string `json:"files_in_scope" jsonschema:"description=File paths currently open or touched in scope,required"`
-	TokenBudget  int      `json:"token_budget" jsonschema:"description=How much context room the agent has left in tokens,required"`
+	PromptText   string   `json:"prompt_text" jsonschema_description:"Developer prompt or query describing intent"`
+	FilesInScope []string `json:"files_in_scope,omitempty" jsonschema_description:"Array of relative or absolute file paths involved in the current code context"`
+	TokenBudget  int      `json:"token_budget,omitempty" jsonschema_description:"Token budget for memory injection"`
 }
 
 type MemorySource struct {
@@ -42,16 +44,23 @@ type MemoryScore struct {
 	LastCited *string `json:"last_cited"`
 }
 
+type MemoryConfidence struct {
+	ExtractionConfidence *float64 `json:"extraction_confidence"`
+	EvidenceStrength     float64  `json:"evidence_strength"`
+	Rationale            string   `json:"rationale"`
+}
+
 type MemoryItem struct {
-	MemoryID   string       `json:"memory_id"`
-	Tier       string       `json:"tier"`
-	Status     string       `json:"status"`
-	Decision   string       `json:"decision"`
-	Reasoning  string       `json:"reasoning"`
-	Source     MemorySource `json:"source"`
-	Touches    []string     `json:"touches"`
-	Score      MemoryScore  `json:"score"`
-	FinalScore float64      `json:"-"`
+	MemoryID   string           `json:"memory_id"`
+	Tier       string           `json:"tier"`
+	Status     string           `json:"status"`
+	Decision   string           `json:"decision"`
+	Reasoning  string           `json:"reasoning"`
+	Source     MemorySource     `json:"source"`
+	Touches    []string         `json:"touches"`
+	Score      MemoryScore      `json:"score"`
+	Confidence MemoryConfidence `json:"confidence"`
+	FinalScore float64          `json:"-"`
 }
 
 type GetRelevantMemoryOutput struct {
@@ -60,13 +69,13 @@ type GetRelevantMemoryOutput struct {
 }
 
 type ResolveMemoryInput struct {
-	MemoryID         string   `json:"memory_id" jsonschema:"description=Synthetic UUID of the memory record,required"`
-	Action           string   `json:"action" jsonschema:"description=Action to perform: confirm | reject | edit,required"`
-	EditedContent    string   `json:"edited_content,omitempty" jsonschema:"description=Required only when action is edit; replaces decision before confirming"`
-	ResolvedBy       string   `json:"resolved_by" jsonschema:"description=GitHub username or agent-session identity,required"`
-	PRMerged         bool     `json:"pr_merged,omitempty" jsonschema:"description=Explicit boolean flag indicating whether the originating PR is merged to the default branch"`
-	AppliesToRepoIDs []string `json:"applies_to_repo_ids,omitempty" jsonschema:"description=Optional array of additional repo UUIDs this decision also explicitly applies to per §9.6"`
-	SourceContext    *string  `json:"source_context,omitempty" jsonschema:"description=Optional context e.g. PR #601 comment or agent session prompt"`
+	MemoryID         string   `json:"memory_id" jsonschema_description:"Synthetic UUID of the memory record"`
+	Action           string   `json:"action" jsonschema_description:"Action to perform: confirm or reject or edit"`
+	EditedContent    string   `json:"edited_content,omitempty" jsonschema_description:"Required only when action is edit"`
+	ResolvedBy       string   `json:"resolved_by" jsonschema_description:"GitHub username or agent-session identity"`
+	PRMerged         bool     `json:"pr_merged,omitempty" jsonschema_description:"Explicit boolean flag indicating whether originating PR is merged"`
+	AppliesToRepoIDs []string `json:"applies_to_repo_ids,omitempty" jsonschema_description:"Optional array of additional repo UUIDs"`
+	SourceContext    *string  `json:"source_context,omitempty" jsonschema_description:"Optional context"`
 }
 
 type ResolveMemoryOutput struct {
@@ -75,6 +84,20 @@ type ResolveMemoryOutput struct {
 	NewStatus      string `json:"new_status"`
 	NewTier        string `json:"new_tier"`
 	ResolvedAt     string `json:"resolved_at"`
+}
+
+type ResolveKnowledgeGapInput struct {
+	GapID         string `json:"gap_id" jsonschema_description:"Synthetic UUID of the knowledge gap"`
+	Action        string `json:"action" jsonschema_description:"Action to perform: answer or acknowledge_unknown"`
+	AnswerContent string `json:"answer_content,omitempty" jsonschema_description:"Required only when action is answer"`
+	ResolvedBy    string `json:"resolved_by" jsonschema_description:"GitHub username or agent-session identity"`
+}
+
+type ResolveKnowledgeGapOutput struct {
+	GapID      string `json:"gap_id"`
+	NewStatus  string `json:"new_status"`
+	MemoryID   string `json:"memory_id,omitempty"`
+	ResolvedAt string `json:"resolved_at"`
 }
 
 func (s *MemoryService) resolveRepoScope(ctx context.Context, filesInScope []string) ([]string, error) {
@@ -118,7 +141,6 @@ func (s *MemoryService) resolveRepoScope(ctx context.Context, filesInScope []str
 		}
 	}
 
-	// If no specific repo matched or files_in_scope is empty, default to all registered repos (§9.6 / requirement 5)
 	if len(implicatedMap) == 0 {
 		for _, r := range allRepos {
 			implicatedMap[r.id] = true
@@ -138,7 +160,6 @@ func (s *MemoryService) HandleGetRelevantMemory(ctx context.Context, req *mcpsdk
 		return nil, GetRelevantMemoryOutput{}, fmt.Errorf("prompt_text is required")
 	}
 
-	// Record read access in audit_log per section 14 of spec
 	auditCtx, _ := json.Marshal(map[string]any{
 		"prompt_text":    input.PromptText,
 		"files_in_scope": input.FilesInScope,
@@ -149,7 +170,6 @@ func (s *MemoryService) HandleGetRelevantMemory(ctx context.Context, req *mcpsdk
 		VALUES (NULL, 'retrieved', 'agent_session', $1);
 	`, auditCtx)
 
-	// Resolve implicated repositories per §9.6
 	implicatedRepoIDs, err := s.resolveRepoScope(ctx, input.FilesInScope)
 	if err != nil {
 		return nil, GetRelevantMemoryOutput{}, err
@@ -158,19 +178,17 @@ func (s *MemoryService) HandleGetRelevantMemory(ctx context.Context, req *mcpsdk
 		return nil, GetRelevantMemoryOutput{QueryTokensUsed: 0, Memories: []MemoryItem{}}, nil
 	}
 
-	// Stage 1 candidate retrieval: semantic similarity via pgvector plus memory_touches_file structural join
-	// Constrained to originating repo or memory_applies_to_repo per section 9.6
 	hasVectorExt := false
 	_ = s.db.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector');").Scan(&hasVectorExt)
 
 	var rows *sql.Rows
 
-	// Rejected records are excluded at retrieval query time per section 9.3 so they never occupy candidate slots
 	if hasVectorExt {
 		query := `
 			SELECT DISTINCT
 				m.memory_id, m.tier, m.status, m.decision, m.reasoning,
 				m.originating_pr_number, m.created_at, m.citation_count, m.last_cited_at,
+				m.extraction_confidence, m.evidence_strength,
 				COALESCE(CASE WHEN m.content_embedding IS NOT NULL THEN (1.0 - (m.content_embedding <=> $1::vector)) ELSE 0.5 END, 0.5) AS relevance_score,
 				ARRAY(SELECT file_path FROM memory_touches_file WHERE memory_id = m.memory_id) AS touched_files
 			FROM memory_record m
@@ -197,6 +215,7 @@ func (s *MemoryService) HandleGetRelevantMemory(ctx context.Context, req *mcpsdk
 			SELECT DISTINCT
 				m.memory_id, m.tier, m.status, m.decision, m.reasoning,
 				m.originating_pr_number, m.created_at, m.citation_count, m.last_cited_at,
+				m.extraction_confidence, m.evidence_strength,
 				0.5 AS relevance_score,
 				ARRAY(SELECT file_path FROM memory_touches_file WHERE memory_id = m.memory_id) AS touched_files
 			FROM memory_record m
@@ -232,10 +251,12 @@ func (s *MemoryService) HandleGetRelevantMemory(ctx context.Context, req *mcpsdk
 		var createdAt time.Time
 		var citationCount int
 		var lastCitedAt sql.NullTime
+		var extConfidence sql.NullFloat64
+		var evStrength float64
 		var stage1Relevance float64
 		var touchedFiles []string
 
-		if err := rows.Scan(&memID, &tier, &status, &decision, &reasoning, &prNum, &createdAt, &citationCount, &lastCitedAt, &stage1Relevance, pq.Array(&touchedFiles)); err != nil {
+		if err := rows.Scan(&memID, &tier, &status, &decision, &reasoning, &prNum, &createdAt, &citationCount, &lastCitedAt, &extConfidence, &evStrength, &stage1Relevance, pq.Array(&touchedFiles)); err != nil {
 			return nil, GetRelevantMemoryOutput{}, fmt.Errorf("failed scanning memory record: %w", err)
 		}
 
@@ -244,11 +265,8 @@ func (s *MemoryService) HandleGetRelevantMemory(ctx context.Context, req *mcpsdk
 			lastCitedPtr = &lastCitedAt.Time
 		}
 
-		// Stage 2 Ranking: Real scoring model per section 9.3
-		// Calculate each named factor independently
 		rel := scoring.CalculateRelevance(stage1Relevance)
 
-		// Query rolling window citation counts for trend calculation
 		var recentCitations, priorCitations int
 		_ = s.db.QueryRowContext(ctx, `
 			SELECT
@@ -264,7 +282,17 @@ func (s *MemoryService) HandleGetRelevantMemory(ctx context.Context, req *mcpsdk
 
 		finalScore := scoring.CalculateFinalScore(rel, trendVal, statusW, recency)
 
-		// Revival check (§9.5): flag lapsed record if citation trend inverts to rising
+		if len(input.FilesInScope) > 0 && len(touchedFiles) > 0 {
+			graphStore := graph.NewPostgresGraphStore(s.db)
+			booster := graph.NewProximityBooster(graphStore, s.db)
+			repoID := ""
+			if len(implicatedRepoIDs) > 0 {
+				repoID = implicatedRepoIDs[0]
+			}
+			boostedScore, _, _ := booster.ApplyProximityBoost(ctx, repoID, memID, touchedFiles[0], finalScore, input.FilesInScope)
+			finalScore = boostedScore
+		}
+
 		_ = scoring.CheckAndFlagRevival(ctx, s.db, memID, status, trendVal)
 
 		trendStr := "flat"
@@ -284,6 +312,18 @@ func (s *MemoryService) HandleGetRelevantMemory(ctx context.Context, req *mcpsdk
 			Trend:     trendStr,
 			Citations: citationCount,
 			LastCited: &lastCitedStr,
+		}
+
+		var extConfPtr *float64
+		if extConfidence.Valid {
+			v := extConfidence.Float64
+			extConfPtr = &v
+		}
+
+		confidence := MemoryConfidence{
+			ExtractionConfidence: extConfPtr,
+			EvidenceStrength:     evStrength,
+			Rationale:            fmt.Sprintf("status: %s, citations: %d, tier: %s", status, citationCount, tier),
 		}
 
 		var sourcePR *int
@@ -313,13 +353,13 @@ func (s *MemoryService) HandleGetRelevantMemory(ctx context.Context, req *mcpsdk
 			},
 			Touches:    touchedFiles,
 			Score:      score,
+			Confidence: confidence,
 			FinalScore: finalScore,
 		}
 
 		candidates = append(candidates, item)
 	}
 
-	// Sort candidates by finalScore descending
 	for i := 0; i < len(candidates)-1; i++ {
 		for j := i + 1; j < len(candidates); j++ {
 			if candidates[j].FinalScore > candidates[i].FinalScore {
@@ -328,7 +368,6 @@ func (s *MemoryService) HandleGetRelevantMemory(ctx context.Context, req *mcpsdk
 		}
 	}
 
-	// Truncate payload to fit token budget
 	var truncated []MemoryItem
 	totalTokens := 0
 	for _, item := range candidates {
@@ -357,7 +396,6 @@ func (s *MemoryService) HandleResolveMemory(ctx context.Context, req *mcpsdk.Cal
 		return nil, ResolveMemoryOutput{}, fmt.Errorf("resolved_by is required")
 	}
 
-	// Fetch target record and verify current status
 	var currentStatus, currentTier, decision string
 	var prNum sql.NullInt64
 	var repoID string
@@ -374,7 +412,6 @@ func (s *MemoryService) HandleResolveMemory(ctx context.Context, req *mcpsdk.Cal
 		return nil, ResolveMemoryOutput{}, fmt.Errorf("failed fetching memory record: %w", err)
 	}
 
-	// Mechanical enforcement (§4 & §13.3): resolve_memory can only transition an existing 'proposed' record
 	if currentStatus != "proposed" {
 		return nil, ResolveMemoryOutput{}, fmt.Errorf("cannot resolve memory record: record status must be 'proposed', but is currently '%s'", currentStatus)
 	}
@@ -395,13 +432,11 @@ func (s *MemoryService) HandleResolveMemory(ctx context.Context, req *mcpsdk.Cal
 
 	if input.Action == "confirm" {
 		newStatus = "confirmed"
-		// PRMerged boolean explicitly passed by caller (e.g. S4 webhook listener on pull_request.closed merged:true)
 		if input.PRMerged {
 			newTier = "canonical"
 			expiresAt = nil
 		} else {
 			newTier = "probabilistic"
-			// Set expiration window based on repo zuri_config (default 60 days)
 			var expiryDays int = 60
 			_ = s.db.QueryRowContext(ctx, "SELECT expiry_days FROM zuri_config WHERE repo_id = $1;", repoID).Scan(&expiryDays)
 			exp := now.AddDate(0, 0, expiryDays)
@@ -432,7 +467,6 @@ func (s *MemoryService) HandleResolveMemory(ctx context.Context, req *mcpsdk.Cal
 		return nil, ResolveMemoryOutput{}, fmt.Errorf("failed to update memory record: %w", err)
 	}
 
-	// Write cross-repo applicability entries (§9.6)
 	if input.Action == "confirm" && len(input.AppliesToRepoIDs) > 0 {
 		for _, appRepoID := range input.AppliesToRepoIDs {
 			_, err = tx.ExecContext(ctx, `
@@ -446,7 +480,6 @@ func (s *MemoryService) HandleResolveMemory(ctx context.Context, req *mcpsdk.Cal
 		}
 	}
 
-	// Audit log entry (§14)
 	auditCtx, _ := json.Marshal(map[string]any{
 		"action":          input.Action,
 		"previous_status": currentStatus,
@@ -481,5 +514,122 @@ func (s *MemoryService) HandleResolveMemory(ctx context.Context, req *mcpsdk.Cal
 		NewStatus:      newStatus,
 		NewTier:        newTier,
 		ResolvedAt:     nowStr,
+	}, nil
+}
+
+func (s *MemoryService) HandleResolveKnowledgeGap(ctx context.Context, req *mcpsdk.CallToolRequest, input ResolveKnowledgeGapInput) (*mcpsdk.CallToolResult, ResolveKnowledgeGapOutput, error) {
+	if input.GapID == "" {
+		return nil, ResolveKnowledgeGapOutput{}, fmt.Errorf("gap_id is required")
+	}
+	if input.Action != "answer" && input.Action != "acknowledge_unknown" {
+		return nil, ResolveKnowledgeGapOutput{}, fmt.Errorf("action must be 'answer' or 'acknowledge_unknown'")
+	}
+	if input.ResolvedBy == "" {
+		return nil, ResolveKnowledgeGapOutput{}, fmt.Errorf("resolved_by is required")
+	}
+
+	var decisionKey, scope, status string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT decision_key, scope, status
+		FROM knowledge_gap
+		WHERE gap_id = $1;
+	`, input.GapID).Scan(&decisionKey, &scope, &status)
+
+	if err == sql.ErrNoRows {
+		return nil, ResolveKnowledgeGapOutput{}, fmt.Errorf("knowledge gap with id %s not found", input.GapID)
+	} else if err != nil {
+		return nil, ResolveKnowledgeGapOutput{}, fmt.Errorf("failed fetching knowledge gap: %w", err)
+	}
+
+	now := time.Now().UTC()
+	nowStr := now.Format(time.RFC3339)
+	var newMemoryID string
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, ResolveKnowledgeGapOutput{}, fmt.Errorf("failed starting transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if input.Action == "answer" {
+		if input.AnswerContent == "" {
+			return nil, ResolveKnowledgeGapOutput{}, fmt.Errorf("answer_content is required when action is 'answer'")
+		}
+
+		var repoID string
+		_ = tx.QueryRowContext(ctx, "SELECT repo_id FROM repo WHERE github_repo_full_name = $1 OR repo_id::text = $1 LIMIT 1;", scope).Scan(&repoID)
+		if repoID == "" {
+			_ = tx.QueryRowContext(ctx, "SELECT repo_id FROM repo LIMIT 1;").Scan(&repoID)
+		}
+
+		err = tx.QueryRowContext(ctx, `
+			INSERT INTO memory_record (
+				repo_id, tier, status, source_type, decision_key, decision, reasoning,
+				evidence_strength, created_by, resolved_by, resolved_at, created_at
+			) VALUES (
+				$1, 'canonical', 'confirmed', 'onboarding_survey', $2, $3, $4,
+				0.65, $5, $5, $6, $6
+			) RETURNING memory_id;
+		`, repoID, decisionKey, input.AnswerContent, "Provided via knowledge gap answer", input.ResolvedBy, now).Scan(&newMemoryID)
+
+		if err != nil {
+			return nil, ResolveKnowledgeGapOutput{}, fmt.Errorf("failed creating memory record for gap answer: %w", err)
+		}
+
+		_, err = tx.ExecContext(ctx, `
+			UPDATE knowledge_gap
+			SET status = 'answered', resolved_at = $1, resolved_by = $2
+			WHERE gap_id = $3;
+		`, now, input.ResolvedBy, input.GapID)
+
+		if err != nil {
+			return nil, ResolveKnowledgeGapOutput{}, fmt.Errorf("failed updating knowledge_gap status: %w", err)
+		}
+
+		auditCtx, _ := json.Marshal(map[string]any{
+			"action":        "answer",
+			"decision_key":  decisionKey,
+			"new_memory_id": newMemoryID,
+		})
+		_, _ = tx.ExecContext(ctx, `
+			INSERT INTO audit_log (gap_id, memory_id, event_type, actor, context, occurred_at)
+			VALUES ($1, $2, 'gap_answered', $3, $4, $5);
+		`, input.GapID, newMemoryID, input.ResolvedBy, auditCtx, now)
+
+	} else if input.Action == "acknowledge_unknown" {
+		_, err = tx.ExecContext(ctx, `
+			UPDATE knowledge_gap
+			SET status = 'acknowledged_unknown', resolved_at = $1, resolved_by = $2
+			WHERE gap_id = $3;
+		`, now, input.ResolvedBy, input.GapID)
+
+		if err != nil {
+			return nil, ResolveKnowledgeGapOutput{}, fmt.Errorf("failed updating knowledge_gap status: %w", err)
+		}
+
+		auditCtx, _ := json.Marshal(map[string]any{
+			"action":       "acknowledge_unknown",
+			"decision_key": decisionKey,
+		})
+		_, _ = tx.ExecContext(ctx, `
+			INSERT INTO audit_log (gap_id, memory_id, event_type, actor, context, occurred_at)
+			VALUES ($1, NULL, 'gap_acknowledged_unknown', $2, $3, $4);
+		`, input.GapID, input.ResolvedBy, auditCtx, now)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, ResolveKnowledgeGapOutput{}, fmt.Errorf("failed committing transaction: %w", err)
+	}
+
+	newStatus := "answered"
+	if input.Action == "acknowledge_unknown" {
+		newStatus = "acknowledged_unknown"
+	}
+
+	return nil, ResolveKnowledgeGapOutput{
+		GapID:      input.GapID,
+		NewStatus:  newStatus,
+		MemoryID:   newMemoryID,
+		ResolvedAt: nowStr,
 	}, nil
 }

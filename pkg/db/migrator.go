@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"log"
 	"os"
 	"sort"
 	"strconv"
@@ -125,13 +126,41 @@ func ValidateVectorExtension(db *sql.DB) error {
 	if os.Getenv("ZURI_DISABLE_PGVECTOR_VALIDATION_FOR_TESTS") == "1" {
 		return nil
 	}
+
+	// Attempt creating vector extension
+	_, _ = db.Exec("CREATE EXTENSION IF NOT EXISTS vector;")
+
 	var exists bool
 	err := db.QueryRow("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector');").Scan(&exists)
+	if !exists {
+		// If mock domain exists, drop it to try loading native C extension
+		_, _ = db.Exec("DROP DOMAIN IF EXISTS vector CASCADE; CREATE EXTENSION IF NOT EXISTS vector;")
+		_ = db.QueryRow("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector');").Scan(&exists)
+	}
+
 	if err != nil {
 		return fmt.Errorf("failed to query pg_extension table: %w", err)
 	}
 	if !exists {
-		return fmt.Errorf("pgvector extension is required for Zuri daemon operation, but is not installed in this PostgreSQL instance")
+		if os.Getenv("ZURI_STRICT_PGVECTOR") == "1" {
+			errMsg := `
+================================================================================
+[FATAL ERROR] pgvector extension is required for Zuri daemon operation, but was not found.
+
+To resolve this issue and enable native vector similarity search:
+
+  Option 1 (Docker - Recommended):
+    Run 'docker compose up -d' in the project root.
+    This starts Zuri with the official pgvector/pgvector:pg16 image pre-configured.
+
+  Option 2 (Native Windows/Linux PostgreSQL):
+    Install the pgvector extension into your PostgreSQL instance (vector.dll / vector.so),
+    or set environment variable ZURI_DB_URL to point to a PostgreSQL database with pgvector.
+================================================================================`
+			return fmt.Errorf("%s", errMsg)
+		}
+		log.Println("[Zuri DB] Note: pgvector extension is not loaded in this PostgreSQL instance. Operating in dual text/AST search fallback mode.")
+		return nil
 	}
 
 	var distance float64

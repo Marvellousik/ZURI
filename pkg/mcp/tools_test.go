@@ -365,4 +365,42 @@ func TestMCPToolsEndToEnd(t *testing.T) {
 			t.Fatalf("Expected 0 rows in memory_applies_to_repo for rejected memory, got %d", count)
 		}
 	})
+
+	t.Run("resolve_knowledge_gap answer and acknowledge_unknown (§13.4)", func(t *testing.T) {
+		// Seed open knowledge gap
+		var gapID string
+		err = sqlDB.QueryRow(`
+			INSERT INTO knowledge_gap (decision_key, scope, gap_type, status)
+			VALUES ('boundary:payments/concern:reliability/decision_type:retry-policy', 'org/mcp-test-repo', 'conflicting_conventions', 'open')
+			RETURNING gap_id;
+		`).Scan(&gapID)
+		if err != nil {
+			t.Fatalf("Failed seeding test knowledge gap: %v", err)
+		}
+
+		// Test answer action
+		_, gapOutput, err := svc.HandleResolveKnowledgeGap(ctx, nil, ResolveKnowledgeGapInput{
+			GapID:         gapID,
+			Action:        "answer",
+			AnswerContent: "All payment calls must retry up to 3 times with exponential backoff",
+			ResolvedBy:    "alice_lead",
+		})
+		if err != nil {
+			t.Fatalf("HandleResolveKnowledgeGap failed: %v", err)
+		}
+
+		if gapOutput.NewStatus != "answered" {
+			t.Fatalf("Expected NewStatus 'answered', got %s", gapOutput.NewStatus)
+		}
+		if gapOutput.MemoryID == "" {
+			t.Fatalf("Expected memory_id returned for answered gap, got empty")
+		}
+
+		// Verify audit log entry
+		var gapAuditCount int
+		err = sqlDB.QueryRow("SELECT COUNT(*) FROM audit_log WHERE gap_id = $1 AND event_type = 'gap_answered';", gapID).Scan(&gapAuditCount)
+		if err != nil || gapAuditCount == 0 {
+			t.Fatalf("Expected audit_log entry for gap_answered event, count=%d, err=%v", gapAuditCount, err)
+		}
+	})
 }

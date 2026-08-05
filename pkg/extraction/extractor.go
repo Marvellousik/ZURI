@@ -19,10 +19,17 @@ type PRContext struct {
 	LinkedIssuesBody []string
 }
 
-// ArchitecturalDecision is the structured result inferred by the LLM.
+// ArchitecturalDecision is the structured result inferred by the LLM (Spec v1.1 & RFC §7.4).
 type ArchitecturalDecision struct {
-	Decision  string `json:"decision"`
-	Reasoning string `json:"reasoning"`
+	Decision                string  `json:"decision"`
+	Reasoning               string  `json:"reasoning"`
+	ExtractionConfidenceRaw float64 `json:"extraction_confidence_raw"`
+	Concern                 string  `json:"concern"`
+	DecisionType            string  `json:"decision_type"`
+	Boundary                string  `json:"boundary"`
+	DecisionKey             string  `json:"decision_key"`
+	ExtractionConfidence    float64 `json:"extraction_confidence"`
+	IsCalibrated            bool    `json:"is_calibrated"`
 }
 
 // ExtractionResult represents the validated output of the pipeline.
@@ -31,26 +38,32 @@ type ExtractionResult struct {
 }
 
 // LLMProvider defines the abstract interface for invoking an LLM.
-// This prevents hardcoding a specific model or vendor (e.g., OpenAI, Anthropic, Gemini).
 type LLMProvider interface {
 	Generate(ctx context.Context, prompt string) (string, error)
 }
 
 type PRExtractor struct {
-	llm LLMProvider
+	llm        LLMProvider
+	calibrator Calibrator
+	modelID    string
 }
 
-// NewPRExtractor initializes a new extraction pipeline.
-func NewPRExtractor(llm LLMProvider) *PRExtractor {
+// NewPRExtractor initializes a new extraction pipeline with optional calibrator.
+func NewPRExtractor(llm LLMProvider, calibrator Calibrator, modelID string) *PRExtractor {
+	if modelID == "" {
+		modelID = "default-extractor-v1"
+	}
 	return &PRExtractor{
-		llm: llm,
+		llm:        llm,
+		calibrator: calibrator,
+		modelID:    modelID,
 	}
 }
 
 // buildPrompt formats the PRContext into a normalized extraction input for the LLM.
 func (e *PRExtractor) buildPrompt(pr PRContext) string {
 	var sb strings.Builder
-	sb.WriteString("Extract architectural and engineering decisions from the following Pull Request.\n")
+	sb.WriteString("Extract architectural and engineering decisions from the following Pull Request per Zuri classification taxonomy.\n")
 	sb.WriteString(fmt.Sprintf("Repository: %s\nPR Number: %d\n\n", pr.RepoFullName, pr.PRNumber))
 
 	if pr.Description != "" {
@@ -77,11 +90,19 @@ func (e *PRExtractor) buildPrompt(pr PRContext) string {
 		sb.WriteString("### Linked Issues\n- " + strings.Join(pr.LinkedIssuesBody, "\n- ") + "\n\n")
 	}
 
-	sb.WriteString("Return the extracted decisions as a JSON object with a single key 'decisions', which is an array of objects having 'decision' and 'reasoning' string fields. If no architectural decisions are present, return an empty array.")
+	sb.WriteString(`Return the extracted decisions as a JSON object with a single key 'decisions', which is an array of objects having the following fields:
+- 'decision' (string): 1-2 sentence description of the decision.
+- 'reasoning' (string): supporting rationale.
+- 'extraction_confidence_raw' (float 0.0 to 1.0): raw confidence in this extraction.
+- 'concern' (string): one of ['reliability', 'security', 'performance', 'data', 'architecture', 'deployment', 'observability'].
+- 'decision_type' (string): specific decision kind (e.g. 'retry-policy', 'schema-design', 'storage-selection', 'fallback-strategy').
+- 'boundary' (string): concrete affected system boundary (e.g. 'payments', 'checkout', 'auth').
+
+If no architectural decisions are present, return an empty array {"decisions": []}.`)
 	return sb.String()
 }
 
-// Extract processes the PR context, invokes the LLM, validates the output, and returns the result.
+// Extract processes the PR context, invokes the LLM, validates the output, calibrates confidence, and returns the result.
 func (e *PRExtractor) Extract(ctx context.Context, pr PRContext) (*ExtractionResult, error) {
 	prompt := e.buildPrompt(pr)
 
@@ -110,7 +131,7 @@ func (e *PRExtractor) Extract(ctx context.Context, pr PRContext) (*ExtractionRes
 		return nil, fmt.Errorf("failed to parse llm response: %w", err)
 	}
 
-	// Validate and filter results
+	// Validate, construct decision keys, and calibrate results
 	var validDecisions []ArchitecturalDecision
 	for _, d := range raw.Decisions {
 		decisionStr := strings.TrimSpace(d.Decision)
@@ -118,9 +139,48 @@ func (e *PRExtractor) Extract(ctx context.Context, pr PRContext) (*ExtractionRes
 
 		// Both fields must be present and non-empty
 		if decisionStr != "" && reasoningStr != "" {
+			concern := strings.ToLower(strings.TrimSpace(d.Concern))
+			if concern == "" {
+				concern = "architecture"
+			}
+			decisionType := strings.ToLower(strings.TrimSpace(d.DecisionType))
+			if decisionType == "" {
+				decisionType = "convention"
+			}
+			boundary := strings.ToLower(strings.TrimSpace(d.Boundary))
+			if boundary == "" {
+				boundary = strings.ToLower(pr.RepoFullName)
+			}
+
+			// Construct decision key per RFC §7.4: boundary:<boundary>/concern:<concern>/decision_type:<decision_type>
+			decisionKey := fmt.Sprintf("boundary:%s/concern:%s/decision_type:%s", boundary, concern, decisionType)
+
+			rawConf := d.ExtractionConfidenceRaw
+			if rawConf <= 0.0 {
+				rawConf = 0.8
+			}
+
+			calibratedConf := rawConf
+			isCalibrated := false
+
+			if e.calibrator != nil {
+				cConf, isCal, err := e.calibrator.Calibrate(ctx, e.modelID, concern, rawConf)
+				if err == nil {
+					calibratedConf = cConf
+					isCalibrated = isCal
+				}
+			}
+
 			validDecisions = append(validDecisions, ArchitecturalDecision{
-				Decision:  decisionStr,
-				Reasoning: reasoningStr,
+				Decision:                decisionStr,
+				Reasoning:               reasoningStr,
+				ExtractionConfidenceRaw: rawConf,
+				Concern:                 concern,
+				DecisionType:            decisionType,
+				Boundary:                boundary,
+				DecisionKey:             decisionKey,
+				ExtractionConfidence:    calibratedConf,
+				IsCalibrated:            isCalibrated,
 			})
 		}
 	}

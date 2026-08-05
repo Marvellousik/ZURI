@@ -44,6 +44,18 @@ func (m *DBManager) Init() error {
 		}
 	}
 
+	connStr := fmt.Sprintf("host=localhost port=%d user=zuri password=zuri_pass dbname=zuri_db sslmode=disable", port)
+
+	// Pre-flight check: if database server is already active and responsive on target port, reuse it directly
+	if existingDB, err := sql.Open("postgres", connStr); err == nil {
+		if pingErr := existingDB.Ping(); pingErr == nil {
+			m.db = existingDB
+			m.connStr = connStr
+			return nil
+		}
+		existingDB.Close()
+	}
+
 	dbPath := os.Getenv("ZURI_DB_PATH")
 	if dbPath == "" {
 		homeDir, err := os.UserHomeDir()
@@ -65,11 +77,13 @@ func (m *DBManager) Init() error {
 
 	m.postgres = embeddedpostgres.NewDatabase(cfg)
 
+	_ = EnsureExtensionFiles(dbPath)
+
 	if err := m.postgres.Start(); err != nil {
 		return fmt.Errorf("failed to start embedded Postgres: %w", err)
 	}
 
-	m.connStr = fmt.Sprintf("host=localhost port=%d user=zuri password=zuri_pass dbname=zuri_db sslmode=disable", port)
+	m.connStr = connStr
 	db, err := sql.Open("postgres", m.connStr)
 	if err != nil {
 		m.postgres.Stop()

@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"zuri-daemon/pkg/api"
 	"zuri-daemon/pkg/db"
 	"zuri-daemon/pkg/mcp"
 	"zuri-daemon/pkg/server"
@@ -36,11 +37,7 @@ func main() {
 	if err := dbMgr.Init(); err != nil {
 		log.Fatalf("Fatal: Database initialization failed: %v", err)
 	}
-	defer func() {
-		if err := dbMgr.Close(); err != nil {
-			log.Printf("Error closing database manager: %v", err)
-		}
-	}()
+	defer dbMgr.Close()
 
 	log.Println("Embedded Postgres database initialized successfully.")
 
@@ -57,12 +54,35 @@ func main() {
 
 	healthSvr := server.NewHealthServer(dbMgr.GetDB(), startTime)
 	mcpHandler := mcp.NewServerHandler(dbMgr.GetDB())
+	apiHandler := api.NewAPIHandler(dbMgr.GetDB())
 	sseServer := sse.NewServer()
+
+	shutdownChan := make(chan os.Signal, 1)
+	signal.Notify(shutdownChan, os.Interrupt, syscall.SIGTERM)
 
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/health", healthSvr.HandleHealthCheck)
 	mux.HandleFunc("/api/health", healthSvr.HandleHealthCheck)
+	mux.HandleFunc("/api/repositories", apiHandler.HandleRepositories)
+	mux.HandleFunc("/api/onboarding", apiHandler.HandleOnboarding)
+	mux.HandleFunc("/api/memory/query", apiHandler.HandleQueryMemory)
+	mux.HandleFunc("/api/audit-log", apiHandler.HandleAuditLog)
+	mux.HandleFunc("/api/agents", apiHandler.HandleAgentRegistrations)
+	mux.HandleFunc("/api/gaps", apiHandler.HandleGaps)
+	mux.HandleFunc("/api/gaps/resolve", apiHandler.HandleGapResolution)
+	mux.HandleFunc("/api/shutdown", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "shutting_down"})
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			shutdownChan <- syscall.SIGTERM
+		}()
+	})
 	mux.Handle("/mcp/", mcpHandler)
 	mux.Handle("/mcp", mcpHandler)
 	mux.Handle("/events/", sseServer)
@@ -96,9 +116,6 @@ func main() {
 		Addr:    addr,
 		Handler: mux,
 	}
-
-	shutdownChan := make(chan os.Signal, 1)
-	signal.Notify(shutdownChan, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
 		log.Printf("Zuri daemon listening on http://%s", addr)
